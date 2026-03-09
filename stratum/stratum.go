@@ -149,6 +149,12 @@ func (c *Client) Authorize() error {
 func (c *Client) Listen(jobChan chan Job) error {
 	c.jobChan = jobChan
 
+	// Enable TCP keepalive to detect dead connections
+	if tc, ok := c.conn.(*net.TCPConn); ok {
+		tc.SetKeepAlive(true)
+		tc.SetKeepAlivePeriod(30 * time.Second)
+	}
+
 	for c.scanner.Scan() {
 		line := c.scanner.Text()
 		if line == "" {
@@ -289,6 +295,7 @@ func (c *Client) call(method string, params interface{}) (*response, error) {
 
 	// Read responses, skipping server notifications until we get our reply
 	c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	defer c.conn.SetReadDeadline(time.Time{}) // clear deadline for Listen()
 	for {
 		if !c.scanner.Scan() {
 			if err := c.scanner.Err(); err != nil {

@@ -3,3 +3,4 @@ cuda/sha256d.o
 cuda/libsha256d.a
 *.log
 .env
+CLAUDE.md
