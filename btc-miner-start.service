@@ -1,0 +1,6 @@
+[Unit]
+Description=Demarre le service miner
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl start btc-miner.service

@@ -1,0 +1,16 @@
+[Unit]
+Description=Bitcoin Solo Miner - cudalotto (GPU)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# INSTALL: replace INSTALL_DIR with your cudalotto directory path
+EnvironmentFile=INSTALL_DIR/.env
+ExecStart=INSTALL_DIR/cudalotto -user ${BTC_ADDRESS} -worker ${WORKER} -pool ${POOL}
+Restart=on-failure
+RestartSec=30
+Nice=19
+
+[Install]
+WantedBy=multi-user.target

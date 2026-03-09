@@ -1,0 +1,6 @@
+[Unit]
+Description=Arrete le service miner
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl stop btc-miner.service
