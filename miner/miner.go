@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arlequin/cudalotto/cuda"
-	"github.com/arlequin/cudalotto/internal"
-	"github.com/arlequin/cudalotto/stratum"
+	"github.com/kwop/cudalotto/cuda"
+	"github.com/kwop/cudalotto/internal"
+	"github.com/kwop/cudalotto/stratum"
 )
 
 const (

@@ -8,9 +8,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/arlequin/cudalotto/cuda"
-	"github.com/arlequin/cudalotto/miner"
-	"github.com/arlequin/cudalotto/stratum"
+	"github.com/kwop/cudalotto/cuda"
+	"github.com/kwop/cudalotto/miner"
+	"github.com/kwop/cudalotto/stratum"
 )
 
 func main() {

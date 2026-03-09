@@ -31,7 +31,7 @@ main.go ──► stratum/ (pool connection, JSON-RPC)
 ## Build
 
 ```bash
-git clone https://github.com/arlequin/cudalotto.git
+git clone https://github.com/kwop/cudalotto.git
 cd cudalotto
 make
 ```
