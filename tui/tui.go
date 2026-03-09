@@ -103,11 +103,16 @@ func render(st *stats.Stats) {
 		fmt.Sprintf("Reconnections: \033[33m%d\033[0m", st.Reconnections.Load()),
 		inner,
 	), inner)
+	row(&b, twocol(
+		fmt.Sprintf("⚠ Errors:       \033[31m%d\033[0m", st.SharesErrors.Load()),
+		"",
+		inner,
+	), inner)
 
 	sep(&b, inner)
 
 	// Log area
-	logH := h - 14
+	logH := h - 15
 	if logH < 3 {
 		logH = 3
 	}

@@ -87,11 +87,13 @@ func main() {
 	poolDisplay = strings.TrimPrefix(poolDisplay, "tcp://")
 	st := stats.New(poolDisplay)
 
-	// Redirect log output in TUI mode
+	// Capture logs: TUI mode = stats only, otherwise = stderr + stats
 	if *tuiMode {
 		log.SetOutput(st)
-		log.SetFlags(log.Ltime)
+	} else {
+		log.SetOutput(io.MultiWriter(os.Stderr, st))
 	}
+	log.SetFlags(log.Ltime)
 
 	log.Printf("[cudalotto] Bitcoin Solo Miner for Jetson (GPU)")
 	log.Printf("[cudalotto] Pool: %s", *pool)

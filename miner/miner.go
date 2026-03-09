@@ -167,6 +167,9 @@ func (m *Miner) Run(jobChan <-chan stratum.Job, quit <-chan struct{}) {
 					nonceHex,
 				); err != nil {
 					log.Printf("[miner] submit error: %v", err)
+					if m.stats != nil {
+						m.stats.SharesErrors.Add(1)
+					}
 				}
 			}
 		}

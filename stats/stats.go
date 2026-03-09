@@ -21,6 +21,7 @@ type Stats struct {
 	SharesSent     atomic.Uint32
 	SharesAccepted atomic.Uint32
 	SharesRejected atomic.Uint32
+	SharesErrors   atomic.Uint32
 	JobsReceived   atomic.Uint32
 	Reconnections  atomic.Uint32
 
@@ -168,6 +169,7 @@ type Snapshot struct {
 	SharesSent      uint32    `json:"shares_sent"`
 	SharesAccepted  uint32    `json:"shares_accepted"`
 	SharesRejected  uint32    `json:"shares_rejected"`
+	SharesErrors    uint32    `json:"shares_errors"`
 	JobsReceived    uint32    `json:"jobs_received"`
 	Reconnections   uint32    `json:"reconnections"`
 	Difficulty      float64   `json:"difficulty"`
@@ -188,6 +190,7 @@ func (s *Stats) Snapshot() Snapshot {
 		SharesSent:      s.SharesSent.Load(),
 		SharesAccepted:  s.SharesAccepted.Load(),
 		SharesRejected:  s.SharesRejected.Load(),
+		SharesErrors:    s.SharesErrors.Load(),
 		JobsReceived:    s.JobsReceived.Load(),
 		Reconnections:   s.Reconnections.Load(),
 		Difficulty:      s.Difficulty(),
@@ -211,6 +214,7 @@ func (s *Stats) LoadSnapshot(data []byte) error {
 	s.SharesSent.Store(snap.SharesSent)
 	s.SharesAccepted.Store(snap.SharesAccepted)
 	s.SharesRejected.Store(snap.SharesRejected)
+	s.SharesErrors.Store(snap.SharesErrors)
 	s.JobsReceived.Store(snap.JobsReceived)
 	s.Reconnections.Store(snap.Reconnections)
 	s.SetDifficulty(snap.Difficulty)
