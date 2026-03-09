@@ -56,6 +56,12 @@ func Scan(midstate [8]uint32, tail [4]uint32, startNonce, rangeSize uint32, targ
 	return results, nil
 }
 
+// SetBlockSize configures threads per block for the mining kernel.
+// Must be a power of 2 between 32 and 1024.
+func SetBlockSize(tpb int) {
+	C.cuda_set_block_size(C.int(tpb))
+}
+
 // Midstate computes the SHA256 midstate for the first 64 bytes of the block header.
 func Midstate(data [16]uint32) [8]uint32 {
 	var out [8]uint32

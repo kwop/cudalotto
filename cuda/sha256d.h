@@ -32,6 +32,10 @@ int cuda_sha256d_scan(
     int max_results
 );
 
+// Set the number of threads per block for the mining kernel.
+// tpb must be a power of 2 between 32 and 1024.
+void cuda_set_block_size(int tpb);
+
 // Compute SHA256 midstate for the first 64 bytes of block header (CPU-side).
 void sha256_midstate(const uint32_t *data64, uint32_t *out_state);
 

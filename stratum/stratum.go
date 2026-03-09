@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kwop/cudalotto/stats"
 )
 
 // Job represents a mining job received from the pool.
@@ -56,6 +58,7 @@ type Client struct {
 	jobChan        chan Job
 	submitChan     chan submitReq
 	connected      atomic.Bool
+	stats          *stats.Stats
 }
 
 type submitReq struct {
@@ -78,6 +81,11 @@ func NewClient(addr, user, pass string) *Client {
 	return c
 }
 
+// SetStats sets the stats tracker.
+func (c *Client) SetStats(s *stats.Stats) {
+	c.stats = s
+}
+
 // Difficulty returns the current mining difficulty.
 func (c *Client) Difficulty() float64 {
 	return c.difficulty.Load().(float64)
@@ -98,6 +106,9 @@ func (c *Client) Connect() error {
 	c.scanner = bufio.NewScanner(conn)
 	c.scanner.Buffer(make([]byte, 64*1024), 64*1024)
 	c.connected.Store(true)
+	if c.stats != nil {
+		c.stats.SetConnected(true)
+	}
 	return nil
 }
 
@@ -175,6 +186,9 @@ func (c *Client) Listen(jobChan chan Job) error {
 	}
 
 	c.connected.Store(false)
+	if c.stats != nil {
+		c.stats.SetConnected(false)
+	}
 	if err := c.scanner.Err(); err != nil {
 		return fmt.Errorf("connection lost: %w", err)
 	}
@@ -196,8 +210,14 @@ func (c *Client) Submit(jobID, extranonce2, ntime, nonce string) error {
 
 	if accepted {
 		log.Printf("[stratum] share ACCEPTED (job=%s nonce=%s)", jobID, nonce)
+		if c.stats != nil {
+			c.stats.SharesAccepted.Add(1)
+		}
 	} else {
 		log.Printf("[stratum] share REJECTED (job=%s nonce=%s error=%s)", jobID, nonce, string(resp.Error))
+		if c.stats != nil {
+			c.stats.SharesRejected.Add(1)
+		}
 	}
 
 	return nil
@@ -244,6 +264,10 @@ func (c *Client) handleNotify(params json.RawMessage) {
 	json.Unmarshal(p[8], &job.CleanJobs)
 
 	log.Printf("[stratum] new job: %s (clean=%v)", job.ID, job.CleanJobs)
+	if c.stats != nil {
+		c.stats.JobsReceived.Add(1)
+		c.stats.SetJobID(job.ID)
+	}
 
 	if c.jobChan == nil {
 		return // not listening yet, discard early jobs
@@ -268,6 +292,9 @@ func (c *Client) handleSetDifficulty(params json.RawMessage) {
 		return
 	}
 	c.difficulty.Store(p[0])
+	if c.stats != nil {
+		c.stats.SetDifficulty(p[0])
+	}
 	log.Printf("[stratum] difficulty set to %f", p[0])
 }
 

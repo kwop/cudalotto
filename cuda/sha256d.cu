@@ -23,8 +23,6 @@ __constant__ uint32_t K[64] = {
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 };
 
-// SHA-256 initial hash values (used inline in kernel for register efficiency)
-
 #define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 #define CH(x, y, z)  (((x) & (y)) ^ (~(x) & (z)))
 #define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
@@ -33,30 +31,37 @@ __constant__ uint32_t K[64] = {
 #define SIG0(x) (ROTR(x, 7) ^ ROTR(x, 18) ^ ((x) >> 3))
 #define SIG1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ ((x) >> 10))
 
-// Swap endianness of a uint32
-__device__ __host__ __forceinline__
+// Device byte swap using CUDA intrinsic (single PTX prmt instruction)
+__device__ __forceinline__
 uint32_t bswap32(uint32_t x) {
-    return ((x & 0xFF) << 24) | ((x & 0xFF00) << 8) |
-           ((x >> 8) & 0xFF00) | ((x >> 24) & 0xFF);
+    return __byte_perm(x, 0, 0x0123);
 }
 
-// SHA-256 compression: transform state with a 16-word (64-byte) block.
-// block must be in big-endian uint32.
+// SHA-256 compression with W[16] sliding window.
+// Uses 16 registers for message schedule instead of 64, improving GPU occupancy.
 __device__ __forceinline__
 void sha256_transform(uint32_t state[8], const uint32_t block[16]) {
-    uint32_t W[64];
+    uint32_t W[16];
     #pragma unroll
     for (int i = 0; i < 16; i++) W[i] = block[i];
-    #pragma unroll
-    for (int i = 16; i < 64; i++)
-        W[i] = SIG1(W[i-2]) + W[i-7] + SIG0(W[i-15]) + W[i-16];
 
     uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
     uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
 
+    // Rounds 0-15: use preloaded block words
     #pragma unroll
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < 16; i++) {
         uint32_t t1 = h + EP1(e) + CH(e, f, g) + K[i] + W[i];
+        uint32_t t2 = EP0(a) + MAJ(a, b, c);
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+
+    // Rounds 16-63: compute W on the fly (sliding window saves 48 registers)
+    #pragma unroll
+    for (int i = 16; i < 64; i++) {
+        W[i & 15] = SIG1(W[(i - 2) & 15]) + W[(i - 7) & 15] + SIG0(W[(i - 15) & 15]) + W[(i - 16) & 15];
+        uint32_t t1 = h + EP1(e) + CH(e, f, g) + K[i] + W[i & 15];
         uint32_t t2 = EP0(a) + MAJ(a, b, c);
         h = g; g = f; f = e; e = d + t1;
         d = c; c = b; b = a; a = t1 + t2;
@@ -147,7 +152,7 @@ static uint32_t *d_result_count = NULL;
 static int initialized = 0;
 
 #define MAX_RESULTS 16
-#define THREADS_PER_BLOCK 256
+static int threads_per_block = 256;
 
 #define CUDA_CHECK(call) do { \
     cudaError_t err = (call); \
@@ -198,6 +203,15 @@ extern "C" void cuda_cleanup(void) {
     initialized = 0;
 }
 
+extern "C" void cuda_set_block_size(int tpb) {
+    if (tpb >= 32 && tpb <= 1024 && (tpb & (tpb - 1)) == 0) {
+        threads_per_block = tpb;
+        fprintf(stderr, "[cudalotto] threads per block: %d\n", tpb);
+    } else {
+        fprintf(stderr, "[cudalotto] invalid block size %d (must be power of 2, 32-1024)\n", tpb);
+    }
+}
+
 extern "C" int cuda_sha256d_scan(
     const uint32_t *midstate,
     const uint32_t *tail,
@@ -216,9 +230,9 @@ extern "C" int cuda_sha256d_scan(
     CUDA_CHECK(cudaMemcpy(d_target, target, 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_result_count, &zero, sizeof(uint32_t), cudaMemcpyHostToDevice));
 
-    int blocks = (range_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    int blocks = (range_size + threads_per_block - 1) / threads_per_block;
 
-    sha256d_kernel<<<blocks, THREADS_PER_BLOCK>>>(
+    sha256d_kernel<<<blocks, threads_per_block>>>(
         d_midstate, d_tail, start_nonce, d_target, d_results, d_result_count, max_results
     );
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/kwop/cudalotto/cuda"
 	"github.com/kwop/cudalotto/internal"
+	"github.com/kwop/cudalotto/stats"
 	"github.com/kwop/cudalotto/stratum"
 )
 
@@ -20,16 +21,18 @@ const (
 type Miner struct {
 	client    *stratum.Client
 	batchSize uint32
+	stats     *stats.Stats
 }
 
 // New creates a new Miner.
-func New(client *stratum.Client, batchSize uint32) *Miner {
+func New(client *stratum.Client, batchSize uint32, st *stats.Stats) *Miner {
 	if batchSize == 0 {
 		batchSize = BatchSize
 	}
 	return &Miner{
 		client:    client,
 		batchSize: batchSize,
+		stats:     st,
 	}
 }
 
@@ -43,6 +46,8 @@ func (m *Miner) Run(jobChan <-chan stratum.Job, quit <-chan struct{}) {
 	var extranonce2 uint64
 	var hashCount uint64
 	var lastReport time.Time
+	var cachedDiff float64
+	var cachedTarget [8]uint32
 
 	for {
 		// Wait for first job or check for new jobs between batches
@@ -108,13 +113,20 @@ func (m *Miner) Run(jobChan <-chan stratum.Job, quit <-chan struct{}) {
 				nonce = 0
 				header, midstate, tail = m.buildWork(*currentJob, extranonce2)
 				_ = header
+				if m.stats != nil {
+					m.stats.SetExtranonce2(extranonce2)
+				}
 				log.Printf("[miner] extranonce2 rolled to %d", extranonce2)
 				continue
 			}
 
-			target := internal.DifficultyToTarget(m.client.Difficulty())
+			diff := m.client.Difficulty()
+			if diff != cachedDiff {
+				cachedTarget = internal.DifficultyToTarget(diff)
+				cachedDiff = diff
+			}
 
-			found, err := cuda.Scan(midstate, tail, nonce, rangeSize, target)
+			found, err := cuda.Scan(midstate, tail, nonce, rangeSize, cachedTarget)
 			if err != nil {
 				log.Printf("[miner] CUDA error: %v", err)
 				time.Sleep(time.Second)
@@ -123,12 +135,18 @@ func (m *Miner) Run(jobChan <-chan stratum.Job, quit <-chan struct{}) {
 
 			hashCount += uint64(rangeSize)
 			nonce += rangeSize
+			if m.stats != nil {
+				m.stats.TotalHashes.Add(uint64(rangeSize))
+			}
 
 			// Report hashrate every 10 seconds
 			if time.Since(lastReport) >= 10*time.Second {
 				elapsed := time.Since(lastReport).Seconds()
 				hps := float64(hashCount) / elapsed
 				log.Printf("[miner] %s | total: %d hashes", internal.FormatHashrate(hps), hashCount)
+				if m.stats != nil {
+					m.stats.SetHashrate(hps)
+				}
 				hashCount = 0
 				lastReport = time.Now()
 			}
@@ -138,6 +156,9 @@ func (m *Miner) Run(jobChan <-chan stratum.Job, quit <-chan struct{}) {
 				en2Hex := fmt.Sprintf("%0*x", m.client.ExtraNonce2Size*2, extranonce2)
 				nonceHex := fmt.Sprintf("%08x", n)
 				log.Printf("[miner] *** SHARE FOUND *** nonce=%s", nonceHex)
+				if m.stats != nil {
+					m.stats.SharesSent.Add(1)
+				}
 
 				if err := m.client.Submit(
 					currentJob.ID,
