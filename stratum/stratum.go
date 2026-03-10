@@ -9,9 +9,16 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/kwop/cudalotto/stats"
+)
+
+const (
+	callTimeout            = 8 * time.Second
+	writeTimeout           = 5 * time.Second
+	staleConnectionTimeout = 90 * time.Second
 )
 
 // Job represents a mining job received from the pool.
@@ -58,6 +65,7 @@ type Client struct {
 	jobChan        chan Job
 	submitChan     chan submitReq
 	connected      atomic.Bool
+	lastMsgTime    atomic.Value // time.Time
 	stats          *stats.Stats
 }
 
@@ -102,10 +110,25 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
 
+	// Aggressive TCP keepalive (like cgminer: idle=45s, interval=30s, 3 probes)
+	// Dead connection detected in 45 + 30*3 = 135s instead of default 7200s
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.SetKeepAlive(true)
+		rc, err := tc.SyscallConn()
+		if err == nil {
+			rc.Control(func(fd uintptr) {
+				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPIDLE, 45)
+				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPINTVL, 30)
+				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPCNT, 3)
+			})
+		}
+	}
+
 	c.conn = conn
 	c.scanner = bufio.NewScanner(conn)
 	c.scanner.Buffer(make([]byte, 64*1024), 64*1024)
 	c.connected.Store(true)
+	c.lastMsgTime.Store(time.Now())
 	if c.stats != nil {
 		c.stats.SetConnected(true)
 	}
@@ -160,17 +183,13 @@ func (c *Client) Authorize() error {
 func (c *Client) Listen(jobChan chan Job) error {
 	c.jobChan = jobChan
 
-	// Enable TCP keepalive to detect dead connections
-	if tc, ok := c.conn.(*net.TCPConn); ok {
-		tc.SetKeepAlive(true)
-		tc.SetKeepAlivePeriod(30 * time.Second)
-	}
-
 	for c.scanner.Scan() {
 		line := c.scanner.Text()
 		if line == "" {
 			continue
 		}
+
+		c.lastMsgTime.Store(time.Now())
 
 		var msg response
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
@@ -195,8 +214,31 @@ func (c *Client) Listen(jobChan chan Job) error {
 	return fmt.Errorf("connection closed by pool")
 }
 
+// IsConnected returns whether the client has an active connection.
+func (c *Client) IsConnected() bool {
+	return c.connected.Load()
+}
+
+// IsStale returns true if no message has been received from the pool recently.
+func (c *Client) IsStale() bool {
+	t, ok := c.lastMsgTime.Load().(time.Time)
+	if !ok {
+		return true
+	}
+	return time.Since(t) > staleConnectionTimeout
+}
+
 // Submit sends a mining.submit to the pool.
 func (c *Client) Submit(jobID, extranonce2, ntime, nonce string) error {
+	// Fast-fail if connection is stale (avoid blocking on dead socket)
+	if c.IsStale() {
+		age := time.Duration(0)
+		if t, ok := c.lastMsgTime.Load().(time.Time); ok {
+			age = time.Since(t)
+		}
+		return fmt.Errorf("submit: connection stale (no message for %v)", age.Round(time.Second))
+	}
+
 	params := []interface{}{c.user, jobID, extranonce2, ntime, nonce}
 	resp, err := c.call("mining.submit", params)
 	if err != nil {
@@ -315,13 +357,13 @@ func (c *Client) call(method string, params interface{}) (*response, error) {
 	}
 	data = append(data, '\n')
 
-	c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	if _, err := c.conn.Write(data); err != nil {
 		return nil, err
 	}
 
 	// Read responses, skipping server notifications until we get our reply
-	c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	c.conn.SetReadDeadline(time.Now().Add(callTimeout))
 	defer c.conn.SetReadDeadline(time.Time{}) // clear deadline for Listen()
 	for {
 		if !c.scanner.Scan() {
@@ -330,6 +372,8 @@ func (c *Client) call(method string, params interface{}) (*response, error) {
 			}
 			return nil, fmt.Errorf("connection closed")
 		}
+
+		c.lastMsgTime.Store(time.Now())
 
 		var resp response
 		if err := json.Unmarshal([]byte(c.scanner.Text()), &resp); err != nil {

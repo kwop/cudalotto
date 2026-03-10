@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -55,6 +56,13 @@ func envDefault(key, fallback string) string {
 }
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "\n[cudalotto] PANIC: %v\n[cudalotto] stack trace:\n%s\n", r, debug.Stack())
+			os.Exit(2)
+		}
+	}()
+
 	// Load .env (won't override existing env vars or CLI flags)
 	loadEnv(".env")
 
@@ -68,7 +76,14 @@ func main() {
 	tuiMode := flag.Bool("tui", false, "Enable terminal UI dashboard")
 	monitor := flag.String("monitor", "", "Monitor a running service (e.g. -monitor localhost:7777)")
 	httpAddr := flag.String("http", "127.0.0.1:7777", "HTTP stats endpoint address")
+	bench := flag.Bool("bench", false, "Run GPU benchmark (no pool connection needed)")
 	flag.Parse()
+
+	// Benchmark mode
+	if *bench {
+		runBenchmark(*device, *threads, *batch)
+		return
+	}
 
 	// Monitor mode: connect to a running service and display TUI
 	if *monitor != "" {
@@ -133,6 +148,11 @@ func main() {
 
 	// Start stratum listener
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[cudalotto] PANIC in stratum listener: %v\n%s", r, debug.Stack())
+			}
+		}()
 		for {
 			err := client.Listen(jobChan)
 			log.Printf("[cudalotto] stratum disconnected: %v", err)
@@ -208,6 +228,87 @@ func main() {
 		log.Printf("[cudalotto] received %v, shutting down...", s)
 		close(quit)
 	}
+}
+
+// runBenchmark tests different GPU configurations and reports hashrate.
+func runBenchmark(device, defaultThreads int, defaultBatch uint) {
+	fmt.Println("=== cudalotto GPU Benchmark ===")
+	fmt.Println()
+
+	if err := cuda.Init(device); err != nil {
+		log.Fatalf("[bench] %v", err)
+	}
+	defer cuda.Cleanup()
+
+	// Dummy mining data (realistic SHA256d workload)
+	midstate := [8]uint32{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+		0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}
+	tail := [4]uint32{0x12345678, 0x9abcdef0, 0x11223344, 0x00000000}
+	// Very high target (almost all hashes pass) to measure raw speed
+	target := [8]uint32{0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
+		0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x0000FFFF}
+
+	type config struct {
+		threads int
+		batch   uint
+		label   string
+	}
+
+	configs := []config{
+		{128, 1 << 23, "threads=128 batch=2^23 (8M)"},
+		{128, 1 << 24, "threads=128 batch=2^24 (16M)"},
+		{128, 1 << 25, "threads=128 batch=2^25 (33M)"},
+		{128, 1 << 26, "threads=128 batch=2^26 (67M)"},
+		{256, 1 << 23, "threads=256 batch=2^23 (8M)"},
+		{256, 1 << 24, "threads=256 batch=2^24 (16M) [CURRENT]"},
+		{256, 1 << 25, "threads=256 batch=2^25 (33M)"},
+		{256, 1 << 26, "threads=256 batch=2^26 (67M)"},
+		{256, 1 << 27, "threads=256 batch=2^27 (134M)"},
+		{512, 1 << 24, "threads=512 batch=2^24 (16M)"},
+		{512, 1 << 25, "threads=512 batch=2^25 (33M)"},
+		{512, 1 << 26, "threads=512 batch=2^26 (67M)"},
+		{64, 1 << 24, "threads=64  batch=2^24 (16M)"},
+		{64, 1 << 25, "threads=64  batch=2^25 (33M)"},
+	}
+
+	fmt.Printf("%-45s %12s %12s\n", "Configuration", "MH/s", "Time/batch")
+	fmt.Println(strings.Repeat("-", 72))
+
+	var bestRate float64
+	var bestLabel string
+
+	for _, c := range configs {
+		cuda.SetBlockSize(c.threads)
+
+		batchSize := uint32(c.batch)
+
+		// Warmup
+		cuda.Scan(midstate, tail, 0, batchSize, target)
+
+		// Benchmark: 3 iterations
+		iterations := 3
+		start := time.Now()
+		for i := 0; i < iterations; i++ {
+			cuda.Scan(midstate, tail, uint32(uint64(i)*uint64(batchSize)), batchSize, target)
+		}
+		elapsed := time.Since(start)
+
+		totalHashes := uint64(batchSize) * uint64(iterations)
+		hashrate := float64(totalHashes) / elapsed.Seconds()
+		perBatch := elapsed / time.Duration(iterations)
+
+		fmt.Printf("%-45s %9.2f MH/s %10s\n", c.label, hashrate/1e6, perBatch.Round(time.Millisecond))
+
+		if hashrate > bestRate {
+			bestRate = hashrate
+			bestLabel = c.label
+		}
+	}
+
+	fmt.Println(strings.Repeat("-", 72))
+	fmt.Printf("BEST: %-39s %9.2f MH/s\n", bestLabel, bestRate/1e6)
+	fmt.Println()
+	fmt.Println("To apply the best config, restart with the matching -threads and -batch flags.")
 }
 
 // runMonitor connects to a running cudalotto service and displays the TUI.

@@ -212,6 +212,46 @@ sudo systemctl status btc-miner   # Status
 sudo journalctl -u btc-miner -f   # Live logs
 ```
 
+### Debugging with journalctl
+
+The miner logs everything to stderr, which systemd captures in the journal. Useful commands:
+
+```bash
+# Live logs
+sudo journalctl -u btc-miner -f
+
+# Today's logs
+sudo journalctl -u btc-miner --since today
+
+# Search for shares found and submit errors
+sudo journalctl -u btc-miner --since today | grep -E "SHARE|submit error|disconnect|reconnect"
+
+# Check for panics (crash with stack trace)
+sudo journalctl -u btc-miner | grep -A 20 "PANIC"
+
+# Check for restarts (service restarted after failure)
+sudo journalctl -u btc-miner | grep -E "Started|Stopped|Main process exited"
+
+# Last 30 minutes of logs
+sudo journalctl -u btc-miner --since "30 min ago"
+
+# Show only errors and warnings
+sudo journalctl -u btc-miner -p err
+
+# Export full logs to a file
+sudo journalctl -u btc-miner --since today --no-pager > /tmp/miner-debug.log
+```
+
+The miner also exposes the last 100 log lines via the HTTP stats endpoint (no sudo needed):
+
+```bash
+# View recent logs without sudo
+curl -s localhost:7777/stats | python3 -c "import sys,json; [print(l) for l in json.load(sys.stdin)['logs']]"
+
+# Search for specific events
+curl -s localhost:7777/stats | python3 -c "import sys,json; [print(l) for l in json.load(sys.stdin)['logs'] if 'SHARE' in l or 'error' in l]"
+```
+
 ## Expected performance
 
 | Device | Est. hashrate | Time to find 1 block |

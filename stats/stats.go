@@ -33,6 +33,7 @@ type Stats struct {
 	extranonce2     uint64
 	connected       bool
 	poolAddr        string
+	remoteUptime    string // set by LoadSnapshot in monitor mode
 
 	logMu    sync.Mutex
 	logLines []string
@@ -154,6 +155,12 @@ func (s *Stats) Uptime() time.Duration {
 }
 
 func (s *Stats) FormatUptime() string {
+	s.mu.RLock()
+	ru := s.remoteUptime
+	s.mu.RUnlock()
+	if ru != "" {
+		return ru
+	}
 	d := s.Uptime()
 	h := int(d.Hours())
 	m := int(d.Minutes()) % 60
@@ -222,10 +229,11 @@ func (s *Stats) LoadSnapshot(data []byte) error {
 	s.SetExtranonce2(snap.Extranonce2)
 	s.SetConnected(snap.Connected)
 
-	// Replace hashrate history
+	// Replace hashrate history and remote uptime
 	s.mu.Lock()
 	s.hashrateHistory = snap.HashrateHistory
 	s.poolAddr = snap.Pool
+	s.remoteUptime = snap.Uptime
 	s.mu.Unlock()
 
 	// Replace logs

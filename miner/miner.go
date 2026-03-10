@@ -4,7 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kwop/cudalotto/cuda"
@@ -17,11 +19,28 @@ const (
 	BatchSize = 1 << 24 // ~16.7M nonces per kernel launch
 )
 
+const (
+	maxPendingShares = 32
+	maxShareAge      = 2 * time.Minute
+	maxShareRetries  = 3
+)
+
+type pendingShare struct {
+	jobID       string
+	extranonce2 string
+	ntime       string
+	nonce       string
+	attempts    int
+	firstTry    time.Time
+}
+
 // Miner orchestrates GPU mining.
 type Miner struct {
 	client    *stratum.Client
 	batchSize uint32
 	stats     *stats.Stats
+	pendingMu sync.Mutex
+	pending   []pendingShare
 }
 
 // New creates a new Miner.
@@ -36,8 +55,74 @@ func New(client *stratum.Client, batchSize uint32, st *stats.Stats) *Miner {
 	}
 }
 
+func (m *Miner) bufferShare(jobID, extranonce2, ntime, nonce string) {
+	m.pendingMu.Lock()
+	defer m.pendingMu.Unlock()
+
+	if len(m.pending) >= maxPendingShares {
+		log.Printf("[miner] share buffer full, dropping oldest share (job=%s nonce=%s)", m.pending[0].jobID, m.pending[0].nonce)
+		m.pending = m.pending[1:]
+	}
+
+	m.pending = append(m.pending, pendingShare{
+		jobID:       jobID,
+		extranonce2: extranonce2,
+		ntime:       ntime,
+		nonce:       nonce,
+		firstTry:    time.Now(),
+	})
+	log.Printf("[miner] share buffered for retry (job=%s nonce=%s, %d pending)", jobID, nonce, len(m.pending))
+}
+
+func (m *Miner) retryPending() {
+	m.pendingMu.Lock()
+	if len(m.pending) == 0 {
+		m.pendingMu.Unlock()
+		return
+	}
+
+	if !m.client.IsConnected() || m.client.IsStale() {
+		m.pendingMu.Unlock()
+		return
+	}
+
+	// Take a copy and release the lock
+	shares := make([]pendingShare, len(m.pending))
+	copy(shares, m.pending)
+	m.pending = m.pending[:0]
+	m.pendingMu.Unlock()
+
+	for _, s := range shares {
+		if time.Since(s.firstTry) > maxShareAge {
+			log.Printf("[miner] dropping stale share (job=%s nonce=%s age=%v)", s.jobID, s.nonce, time.Since(s.firstTry).Round(time.Second))
+			continue
+		}
+		if s.attempts >= maxShareRetries {
+			log.Printf("[miner] dropping share after %d retries (job=%s nonce=%s)", s.attempts, s.jobID, s.nonce)
+			if m.stats != nil {
+				m.stats.SharesErrors.Add(1)
+			}
+			continue
+		}
+
+		log.Printf("[miner] retrying share (job=%s nonce=%s attempt=%d)", s.jobID, s.nonce, s.attempts+1)
+		if err := m.client.Submit(s.jobID, s.extranonce2, s.ntime, s.nonce); err != nil {
+			log.Printf("[miner] retry failed: %v", err)
+			s.attempts++
+			m.pendingMu.Lock()
+			m.pending = append(m.pending, s)
+			m.pendingMu.Unlock()
+		}
+	}
+}
+
 // Run is the main mining loop. It reads jobs from jobChan and mines on the GPU.
 func (m *Miner) Run(jobChan <-chan stratum.Job, quit <-chan struct{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[miner] PANIC: %v\n%s", r, debug.Stack())
+		}
+	}()
 	var currentJob *stratum.Job
 	var header [80]byte
 	var midstate [8]uint32
@@ -151,6 +236,9 @@ func (m *Miner) Run(jobChan <-chan stratum.Job, quit <-chan struct{}) {
 				lastReport = time.Now()
 			}
 
+			// Retry any buffered shares
+			m.retryPending()
+
 			// Submit found nonces
 			for _, n := range found {
 				en2Hex := fmt.Sprintf("%0*x", m.client.ExtraNonce2Size*2, extranonce2)
@@ -166,10 +254,11 @@ func (m *Miner) Run(jobChan <-chan stratum.Job, quit <-chan struct{}) {
 					currentJob.NTime,
 					nonceHex,
 				); err != nil {
-					log.Printf("[miner] submit error: %v", err)
+					log.Printf("[miner] submit error: %v — buffering for retry", err)
 					if m.stats != nil {
 						m.stats.SharesErrors.Add(1)
 					}
+					m.bufferShare(currentJob.ID, en2Hex, currentJob.NTime, nonceHex)
 				}
 			}
 		}
