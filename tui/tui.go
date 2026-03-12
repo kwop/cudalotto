@@ -109,10 +109,43 @@ func render(st *stats.Stats) {
 		inner,
 	), inner)
 
+	// Error history
+	errEvents := st.ErrorEvents()
+	if len(errEvents) > 0 {
+		sep(&b, inner)
+		row(&b, "\033[1;31mError History\033[0m", inner)
+		errH := len(errEvents)
+		if errH > 5 {
+			errH = 5
+		}
+		// Show most recent errors last
+		start := len(errEvents) - errH
+		for i := start; i < len(errEvents); i++ {
+			e := errEvents[i]
+			ts := e.Time.Format("Jan 02 15:04:05")
+			line := fmt.Sprintf("\033[31m%s\033[0m %s", ts, e.Message)
+			runes := []rune(line)
+			if vwidth(line) > inner {
+				// Truncate the visible part
+				line = truncateVisible(line, inner-1) + "…"
+			}
+			_ = runes
+			row(&b, line, inner)
+		}
+	}
+
 	sep(&b, inner)
 
 	// Log area
-	logH := h - 15
+	errRows := 0
+	if len(errEvents) > 0 {
+		errH := len(errEvents)
+		if errH > 5 {
+			errH = 5
+		}
+		errRows = errH + 2 // header + separator + lines
+	}
+	logH := h - 15 - errRows
 	if logH < 3 {
 		logH = 3
 	}
@@ -257,4 +290,26 @@ func termSize() (int, int) {
 		h = 24
 	}
 	return w, h
+}
+
+func truncateVisible(s string, maxWidth int) string {
+	n := 0
+	esc := false
+	for i, r := range s {
+		if r == '\033' {
+			esc = true
+			continue
+		}
+		if esc {
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+				esc = false
+			}
+			continue
+		}
+		n++
+		if n >= maxWidth {
+			return s[:i+len(string(r))]
+		}
+	}
+	return s
 }

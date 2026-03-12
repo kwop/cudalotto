@@ -99,8 +99,8 @@ func (c *Client) Difficulty() float64 {
 	return c.difficulty.Load().(float64)
 }
 
-// Connect establishes a TCP connection to the pool.
-func (c *Client) Connect() error {
+// connectTCP establishes the raw TCP connection without marking as connected.
+func (c *Client) connectTCP() error {
 	addr := c.addr
 	addr = strings.TrimPrefix(addr, "stratum+tcp://")
 	addr = strings.TrimPrefix(addr, "tcp://")
@@ -127,8 +127,17 @@ func (c *Client) Connect() error {
 	c.conn = conn
 	c.scanner = bufio.NewScanner(conn)
 	c.scanner.Buffer(make([]byte, 64*1024), 64*1024)
-	c.connected.Store(true)
 	c.lastMsgTime.Store(time.Now())
+	return nil
+}
+
+// Connect establishes a TCP connection to the pool and marks the client as connected.
+// Used for the initial connection at startup.
+func (c *Client) Connect() error {
+	if err := c.connectTCP(); err != nil {
+		return err
+	}
+	c.connected.Store(true)
 	if c.stats != nil {
 		c.stats.SetConnected(true)
 	}
@@ -265,10 +274,41 @@ func (c *Client) Submit(jobID, extranonce2, ntime, nonce string) error {
 	return nil
 }
 
+// Reconnect closes the existing connection and re-establishes a full session
+// (connect + subscribe + authorize) on the same Client instance, preserving
+// all pointers held by the miner and avoiding unsafe atomic copies.
+// connected is only set to true after the full handshake succeeds, so the
+// miner won't attempt submits on a half-initialized connection.
+func (c *Client) Reconnect() error {
+	c.Close()
+	if err := c.connectTCP(); err != nil {
+		return fmt.Errorf("reconnect: %w", err)
+	}
+	if err := c.Subscribe(); err != nil {
+		c.Close()
+		return fmt.Errorf("resubscribe: %w", err)
+	}
+	if err := c.Authorize(); err != nil {
+		c.Close()
+		return fmt.Errorf("reauthorize: %w", err)
+	}
+	c.connected.Store(true)
+	c.lastMsgTime.Store(time.Now())
+	if c.stats != nil {
+		c.stats.SetConnected(true)
+	}
+	return nil
+}
+
 // Close closes the connection.
 func (c *Client) Close() {
+	c.connected.Store(false)
+	if c.stats != nil {
+		c.stats.SetConnected(false)
+	}
 	if c.conn != nil {
 		c.conn.Close()
+		c.conn = nil
 	}
 }
 

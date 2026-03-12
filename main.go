@@ -146,6 +146,9 @@ func main() {
 	jobChan := make(chan stratum.Job, 2)
 	quit := make(chan struct{})
 
+	// Create miner (before stratum goroutine so FlushPending is available)
+	m := miner.New(client, uint32(*batch), st)
+
 	// Start stratum listener
 	go func() {
 		defer func() {
@@ -162,7 +165,11 @@ func main() {
 			default:
 			}
 
-			// Reconnect
+			// Flush buffered shares — ExtraNonce1 will change after Subscribe,
+			// making any old shares invalid.
+			m.FlushPending()
+
+			// Reconnect on the same client (preserves pointers held by miner)
 			for {
 				log.Printf("[cudalotto] reconnecting in 10s...")
 				time.Sleep(10 * time.Second)
@@ -172,25 +179,11 @@ func main() {
 				default:
 				}
 
-				client.Close()
-				newClient := stratum.NewClient(*pool, fullUser, *pass)
-				newClient.SetStats(st)
-				if err := newClient.Connect(); err != nil {
+				if err := client.Reconnect(); err != nil {
 					log.Printf("[cudalotto] reconnect failed: %v", err)
 					continue
 				}
-				if err := newClient.Subscribe(); err != nil {
-					log.Printf("[cudalotto] resubscribe failed: %v", err)
-					newClient.Close()
-					continue
-				}
-				if err := newClient.Authorize(); err != nil {
-					log.Printf("[cudalotto] reauthorize failed: %v", err)
-					newClient.Close()
-					continue
-				}
 				st.Reconnections.Add(1)
-				*client = *newClient
 				break
 			}
 		}
@@ -208,7 +201,6 @@ func main() {
 	}
 
 	// Start miner
-	m := miner.New(client, uint32(*batch), st)
 	go m.Run(jobChan, quit)
 
 	// Signal handling

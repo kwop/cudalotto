@@ -74,6 +74,23 @@ func (m *Miner) bufferShare(jobID, extranonce2, ntime, nonce string) {
 	log.Printf("[miner] share buffered for retry (job=%s nonce=%s, %d pending)", jobID, nonce, len(m.pending))
 }
 
+// FlushPending drops all buffered shares and records errors.
+// Called on reconnection because ExtraNonce1 changes, making old shares invalid.
+func (m *Miner) FlushPending() {
+	m.pendingMu.Lock()
+	shares := m.pending
+	m.pending = nil
+	m.pendingMu.Unlock()
+
+	for _, s := range shares {
+		msg := fmt.Sprintf("share invalidated by reconnection (job=%s nonce=%s)", s.jobID, s.nonce)
+		log.Printf("[miner] %s", msg)
+		if m.stats != nil {
+			m.stats.AddError(msg)
+		}
+	}
+}
+
 func (m *Miner) retryPending() {
 	m.pendingMu.Lock()
 	if len(m.pending) == 0 {
@@ -94,13 +111,18 @@ func (m *Miner) retryPending() {
 
 	for _, s := range shares {
 		if time.Since(s.firstTry) > maxShareAge {
-			log.Printf("[miner] dropping stale share (job=%s nonce=%s age=%v)", s.jobID, s.nonce, time.Since(s.firstTry).Round(time.Second))
+			msg := fmt.Sprintf("share expired after %v (job=%s nonce=%s)", time.Since(s.firstTry).Round(time.Second), s.jobID, s.nonce)
+			log.Printf("[miner] %s", msg)
+			if m.stats != nil {
+				m.stats.AddError(msg)
+			}
 			continue
 		}
 		if s.attempts >= maxShareRetries {
-			log.Printf("[miner] dropping share after %d retries (job=%s nonce=%s)", s.attempts, s.jobID, s.nonce)
+			msg := fmt.Sprintf("share dropped after %d retries (job=%s nonce=%s)", s.attempts, s.jobID, s.nonce)
+			log.Printf("[miner] %s", msg)
 			if m.stats != nil {
-				m.stats.SharesErrors.Add(1)
+				m.stats.AddError(msg)
 			}
 			continue
 		}
@@ -254,9 +276,10 @@ func (m *Miner) Run(jobChan <-chan stratum.Job, quit <-chan struct{}) {
 					currentJob.NTime,
 					nonceHex,
 				); err != nil {
-					log.Printf("[miner] submit error: %v — buffering for retry", err)
+					msg := fmt.Sprintf("submit failed (job=%s nonce=%s): %v", currentJob.ID, nonceHex, err)
+					log.Printf("[miner] %s — buffering for retry", msg)
 					if m.stats != nil {
-						m.stats.SharesErrors.Add(1)
+						m.stats.AddError(msg)
 					}
 					m.bufferShare(currentJob.ID, en2Hex, currentJob.NTime, nonceHex)
 				}

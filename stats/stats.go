@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	maxHistory = 120
-	maxLogs    = 100
+	maxHistory       = 120
+	maxLogs          = 100
+	maxErrorHistory  = 50
 )
 
 // Stats holds mining statistics shared between miner, stratum, and TUI.
@@ -37,6 +38,15 @@ type Stats struct {
 
 	logMu    sync.Mutex
 	logLines []string
+
+	errorMu     sync.Mutex
+	errorEvents []ErrorEvent
+}
+
+// ErrorEvent records a share error with timestamp and details.
+type ErrorEvent struct {
+	Time    time.Time `json:"time"`
+	Message string    `json:"message"`
 }
 
 // New creates a new Stats instance.
@@ -124,6 +134,29 @@ func (s *Stats) PoolAddr() string {
 	return s.poolAddr
 }
 
+// AddError increments the error counter and records the event for history.
+func (s *Stats) AddError(msg string) {
+	s.SharesErrors.Add(1)
+	s.errorMu.Lock()
+	defer s.errorMu.Unlock()
+	s.errorEvents = append(s.errorEvents, ErrorEvent{
+		Time:    time.Now(),
+		Message: msg,
+	})
+	if len(s.errorEvents) > maxErrorHistory {
+		s.errorEvents = s.errorEvents[1:]
+	}
+}
+
+// ErrorEvents returns a copy of the error history.
+func (s *Stats) ErrorEvents() []ErrorEvent {
+	s.errorMu.Lock()
+	defer s.errorMu.Unlock()
+	out := make([]ErrorEvent, len(s.errorEvents))
+	copy(out, s.errorEvents)
+	return out
+}
+
 // Write implements io.Writer for log capture.
 func (s *Stats) Write(p []byte) (int, error) {
 	s.logMu.Lock()
@@ -184,8 +217,9 @@ type Snapshot struct {
 	Extranonce2     uint64    `json:"extranonce2"`
 	Connected       bool      `json:"connected"`
 	Pool            string    `json:"pool"`
-	HashrateHistory []float64 `json:"hashrate_history"`
-	Logs            []string  `json:"logs"`
+	HashrateHistory []float64    `json:"hashrate_history"`
+	Logs            []string     `json:"logs"`
+	ErrorEvents     []ErrorEvent `json:"error_events,omitempty"`
 }
 
 // Snapshot returns a JSON-serializable snapshot.
@@ -207,6 +241,7 @@ func (s *Stats) Snapshot() Snapshot {
 		Pool:            s.PoolAddr(),
 		HashrateHistory: s.HashrateHistory(),
 		Logs:            s.LogLines(maxLogs),
+		ErrorEvents:     s.ErrorEvents(),
 	}
 }
 
@@ -240,6 +275,11 @@ func (s *Stats) LoadSnapshot(data []byte) error {
 	s.logMu.Lock()
 	s.logLines = snap.Logs
 	s.logMu.Unlock()
+
+	// Replace error events
+	s.errorMu.Lock()
+	s.errorEvents = snap.ErrorEvents
+	s.errorMu.Unlock()
 
 	return nil
 }
